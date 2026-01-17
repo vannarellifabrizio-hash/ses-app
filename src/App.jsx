@@ -95,60 +95,9 @@ function Pill({ color, label }) {
  * - Dopo ogni render, se quel fid esiste ancora, ripristiniamo focus e caret
  */
 function useFocusKeeper() {
-  const last = useRef({ fid: null, start: null, end: null });
-  const raf = useRef(null);
-
-  const capture = (el) => {
-    const fid = el?.getAttribute?.("data-fid");
-    if (!fid) return;
-    let start = null;
-    let end = null;
-    try {
-      if (typeof el.selectionStart === "number") start = el.selectionStart;
-      if (typeof el.selectionEnd === "number") end = el.selectionEnd;
-    } catch {}
-    last.current = { fid, start, end };
-  };
-
-  useEffect(() => {
-    const onFocusIn = (e) => capture(e.target);
-    const onInput = (e) => capture(e.target);
-
-    document.addEventListener("focusin", onFocusIn, true);
-    document.addEventListener("input", onInput, true);
-
-    return () => {
-      document.removeEventListener("focusin", onFocusIn, true);
-      document.removeEventListener("input", onInput, true);
-      if (raf.current) cancelAnimationFrame(raf.current);
-    };
-  }, []);
-
-  // Chiama questa funzione dopo ogni render “importante”
-  const restore = () => {
-    if (raf.current) cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(() => {
-      const { fid, start, end } = last.current;
-      if (!fid) return;
-      const el = document.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
-      if (!el) return;
-      if (document.activeElement === el) return;
-
-      try {
-        el.focus({ preventScroll: true });
-      } catch {
-        try { el.focus(); } catch {}
-      }
-      try {
-        if (typeof start === "number" && typeof end === "number" && typeof el.setSelectionRange === "function") {
-          el.setSelectionRange(start, end);
-        }
-      } catch {}
-    });
-  };
-
-  return { restore };
+  return { restore: () => {} };
 }
+
 
 // Input wrapper con data-fid
 function FInput({ fid, style, ...props }) {
@@ -235,12 +184,6 @@ export default function App() {
 
   const mounted = useRef(false);
   const focusKeeper = useFocusKeeper();
-
- // Ripristina il focus SOLO quando cambia la view
-useEffect(() => {
-  focusKeeper.restore();
-}, [view]);
-
 
   useEffect(() => {
     mounted.current = true;

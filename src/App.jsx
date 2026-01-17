@@ -5,8 +5,9 @@ import autoTable from "jspdf-autotable";
 
 /**
  * SES App (Supabase)
- * FIX focus/cursore:
- * - Componenti di pagina spostati FUORI da App() per evitare remount ad ogni render.
+ * FIX "cursore esce dal campo":
+ * - FocusKeeper: salva l'input attivo + posizione del cursore
+ * - dopo ogni render ripristina focus e caret
  */
 
 const supabase = createClient(
@@ -17,11 +18,6 @@ const supabase = createClient(
 const clamp10 = (arr) => arr.slice(0, 10);
 const uid = () => Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
 
-function fmtDate(iso) {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return d.toLocaleDateString("it-IT", { year: "numeric", month: "2-digit", day: "2-digit" });
-}
 function fmtDateTime(iso) {
   if (!iso) return "-";
   const d = new Date(iso);
@@ -83,7 +79,6 @@ function SectionTitle({ title, right }) {
     </div>
   );
 }
-
 function Pill({ color, label }) {
   return (
     <span style={styles.badge}>
@@ -93,7 +88,81 @@ function Pill({ color, label }) {
   );
 }
 
-/** Activity item (fuori da App per evitare remount) */
+/**
+ * FocusKeeper:
+ * - Assegniamo data-fid a input/select/textarea
+ * - Salviamo (fid, selectionStart/End) su focus + input
+ * - Dopo ogni render, se quel fid esiste ancora, ripristiniamo focus e caret
+ */
+function useFocusKeeper() {
+  const last = useRef({ fid: null, start: null, end: null });
+  const raf = useRef(null);
+
+  const capture = (el) => {
+    const fid = el?.getAttribute?.("data-fid");
+    if (!fid) return;
+    let start = null;
+    let end = null;
+    try {
+      if (typeof el.selectionStart === "number") start = el.selectionStart;
+      if (typeof el.selectionEnd === "number") end = el.selectionEnd;
+    } catch {}
+    last.current = { fid, start, end };
+  };
+
+  useEffect(() => {
+    const onFocusIn = (e) => capture(e.target);
+    const onInput = (e) => capture(e.target);
+
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("input", onInput, true);
+
+    return () => {
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("input", onInput, true);
+      if (raf.current) cancelAnimationFrame(raf.current);
+    };
+  }, []);
+
+  // Chiama questa funzione dopo ogni render “importante”
+  const restore = () => {
+    if (raf.current) cancelAnimationFrame(raf.current);
+    raf.current = requestAnimationFrame(() => {
+      const { fid, start, end } = last.current;
+      if (!fid) return;
+      const el = document.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
+      if (!el) return;
+      if (document.activeElement === el) return;
+
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        try { el.focus(); } catch {}
+      }
+      try {
+        if (typeof start === "number" && typeof end === "number" && typeof el.setSelectionRange === "function") {
+          el.setSelectionRange(start, end);
+        }
+      } catch {}
+    });
+  };
+
+  return { restore };
+}
+
+// Input wrapper con data-fid
+function FInput({ fid, style, ...props }) {
+  return <input data-fid={fid} style={{ ...styles.input, ...style }} {...props} />;
+}
+function FSelect({ fid, style, children, ...props }) {
+  return (
+    <select data-fid={fid} style={{ ...styles.select, ...style }} {...props}>
+      {children}
+    </select>
+  );
+}
+
+/** Activity item */
 function ActivityItem({ a, allowEdit, profilesById, editActId, editActText, setEditActId, setEditActText, onUpdate, onDelete }) {
   const user = profilesById.get(a.user_id);
   const name = user?.name || user?.email || "—";
@@ -114,7 +183,7 @@ function ActivityItem({ a, allowEdit, profilesById, editActId, editActText, setE
 
         {isEditing && (
           <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
-            <input style={styles.input} value={editActText} onChange={(e) => setEditActText(e.target.value)} />
+            <FInput fid={`act-edit-${a.id}`} value={editActText} onChange={(e) => setEditActText(e.target.value)} />
             <button style={styles.btn} onClick={() => onUpdate(a.id)}>Salva</button>
             <button style={styles.btn2} onClick={() => { setEditActId(null); setEditActText(""); }}>Annulla</button>
           </div>
@@ -133,571 +202,13 @@ function ActivityItem({ a, allowEdit, profilesById, editActId, editActText, setE
   );
 }
 
-function AuthView({ intent, authEmail, authPass, setAuthEmail, setAuthPass, authError, doLogin, goBack }) {
-  return (
-    <div style={styles.page}>
-      <div style={styles.topbar}>
-        <div>
-          <h1 style={styles.h1}>Login</h1>
-          <div style={styles.small}>
-            Sezione scelta: <b>{intent || "—"}</b>
-          </div>
-        </div>
-        <button style={styles.btn2} onClick={goBack}>← Indietro</button>
-      </div>
-
-      <div style={{ ...styles.card, maxWidth: 520 }}>
-        <div style={{ display: "grid", gap: 10 }}>
-          <div>
-            <div style={styles.small}>Email</div>
-            <input style={styles.input} value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="es. admin@test.it" />
-          </div>
-          <div>
-            <div style={styles.small}>Password</div>
-            <input style={styles.input} type="password" value={authPass} onChange={(e) => setAuthPass(e.target.value)} placeholder="••••••••" />
-          </div>
-
-          {authError && (
-            <div style={{ padding: 10, borderRadius: 10, background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" }}>
-              {authError}
-            </div>
-          )}
-
-          <button style={styles.btn} onClick={doLogin}>Entra</button>
-
-          <div style={styles.small}>
-            Nota: le password utenti si gestiscono in <b>Supabase → Authentication → Users</b>.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MissingProfile({ doLogout }) {
-  return (
-    <div style={styles.page}>
-      <div style={{ ...styles.card }}>
-        <div style={{ fontWeight: 800, marginBottom: 8 }}>Profilo mancante</div>
-        <div style={{ color: "#6b7280", marginBottom: 10 }}>
-          Questo utente ha fatto login, ma non esiste una riga in <b>profiles</b> con il suo UUID.
-        </div>
-        <div style={styles.small}>
-          Vai in <b>Supabase → Table Editor → profiles → Insert row</b> e inserisci:
-          <br />- <b>id</b> = UUID utente (da Authentication → Users)
-          <br />- <b>email</b>, <b>name</b>, <b>color</b>, <b>role</b>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <button style={styles.btn2} onClick={doLogout}>Logout</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdminView({
-  profile,
-  projects,
-  profiles,
-  newProj,
-  setNewProj,
-  createProject,
-  renameProj,
-  setRenameProj,
-  updateProject,
-  deleteProject,
-  editProfile,
-  setEditProfile,
-  saveProfileEdits,
-  refreshAll,
-  goHome,
-  doLogout,
-}) {
-  return (
-    <div style={styles.page}>
-      <div style={styles.topbar}>
-        <div>
-          <h1 style={styles.h1}>Pannello Admin</h1>
-          <div style={styles.small}>
-            {profile.name} — ruolo <b>{profile.role}</b>
-          </div>
-        </div>
-        <div style={styles.row}>
-          <button style={styles.btn2} onClick={goHome}>Home</button>
-          <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
-          <button style={styles.btn2} onClick={doLogout}>Logout</button>
-        </div>
-      </div>
-
-      <div style={styles.grid}>
-        <div style={styles.card}>
-          <SectionTitle title="Progetti" right={null} />
-
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ fontWeight: 700 }}>Crea progetto</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              <input
-                style={styles.input}
-                placeholder="Titolo"
-                value={newProj.title}
-                onChange={(e) => setNewProj((p) => ({ ...p, title: e.target.value }))}
-              />
-              <input
-                style={styles.input}
-                placeholder="Sottotitolo"
-                value={newProj.subtitle}
-                onChange={(e) => setNewProj((p) => ({ ...p, subtitle: e.target.value }))}
-              />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div>
-                  <div style={styles.small}>Inizio</div>
-                  <input
-                    style={styles.input}
-                    type="date"
-                    value={newProj.start_date}
-                    onChange={(e) => setNewProj((p) => ({ ...p, start_date: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <div style={styles.small}>Fine</div>
-                  <input
-                    style={styles.input}
-                    type="date"
-                    value={newProj.end_date}
-                    onChange={(e) => setNewProj((p) => ({ ...p, end_date: e.target.value }))}
-                  />
-                </div>
-              </div>
-              <button style={styles.btn} onClick={createProject}>Crea</button>
-            </div>
-
-            <hr style={{ border: 0, borderTop: "1px solid #e5e7eb" }} />
-
-            <div style={{ fontWeight: 700 }}>Rinomina / modifica sottotitolo</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              <select
-                style={styles.select}
-                value={renameProj.id}
-                onChange={(e) => {
-                  const id = e.target.value;
-                  const p = projects.find((x) => x.id === id);
-                  setRenameProj({ id, title: p?.title || "", subtitle: p?.subtitle || "" });
-                }}
-              >
-                <option value="">Seleziona progetto…</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.title}</option>
-                ))}
-              </select>
-              <input style={styles.input} placeholder="Nuovo titolo" value={renameProj.title} onChange={(e) => setRenameProj((p) => ({ ...p, title: e.target.value }))} />
-              <input style={styles.input} placeholder="Nuovo sottotitolo" value={renameProj.subtitle} onChange={(e) => setRenameProj((p) => ({ ...p, subtitle: e.target.value }))} />
-              <button style={styles.btn2} onClick={updateProject} disabled={!renameProj.id}>Salva modifiche</button>
-            </div>
-
-            <hr style={{ border: 0, borderTop: "1px solid #e5e7eb" }} />
-
-            <div style={{ fontWeight: 700 }}>Elimina progetto</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {projects.map((p) => (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <div>
-                    <div style={{ fontWeight: 700 }}>{p.title}</div>
-                    <div style={styles.small}>
-                      {p.subtitle || "—"} • {p.start_date} → {p.end_date}
-                    </div>
-                  </div>
-                  <button style={styles.btnDanger} onClick={() => deleteProject(p.id)}>Elimina</button>
-                </div>
-              ))}
-              {projects.length === 0 && <div style={styles.small}>Nessun progetto.</div>}
-            </div>
-          </div>
-        </div>
-
-        <div style={styles.card}>
-          <SectionTitle title="Collaboratori (profili)" right={null} />
-          <div style={{ ...styles.small, marginBottom: 10 }}>
-            Qui modifichi <b>nome/colore/ruolo</b>. Le password NON si modificano qui: vai in <b>Supabase → Authentication → Users</b>.
-          </div>
-
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ fontWeight: 700 }}>Modifica profilo</div>
-            <select
-              style={styles.select}
-              value={editProfile.id}
-              onChange={(e) => {
-                const id = e.target.value;
-                const p = profiles.find((x) => x.id === id);
-                setEditProfile({
-                  id,
-                  name: p?.name || "",
-                  color: p?.color || "#111111",
-                  role: p?.role || "collab",
-                });
-              }}
-            >
-              <option value="">Seleziona utente…</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.role})
-                </option>
-              ))}
-            </select>
-
-            <div style={{ display: "grid", gap: 8, opacity: editProfile.id ? 1 : 0.6 }}>
-              <input style={styles.input} value={editProfile.name} onChange={(e) => setEditProfile((p) => ({ ...p, name: e.target.value }))} placeholder="Nome" disabled={!editProfile.id} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div>
-                  <div style={styles.small}>Colore</div>
-                  <input type="color" value={editProfile.color} onChange={(e) => setEditProfile((p) => ({ ...p, color: e.target.value }))} disabled={!editProfile.id} />
-                </div>
-                <div>
-                  <div style={styles.small}>Ruolo</div>
-                  <select style={styles.select} value={editProfile.role} onChange={(e) => setEditProfile((p) => ({ ...p, role: e.target.value }))} disabled={!editProfile.id}>
-                    <option value="collab">collab</option>
-                    <option value="dashboard">dashboard</option>
-                    <option value="admin">admin</option>
-                  </select>
-                </div>
-              </div>
-
-              <button style={styles.btn} onClick={saveProfileEdits} disabled={!editProfile.id}>Salva profilo</button>
-            </div>
-
-            <hr style={{ border: 0, borderTop: "1px solid #e5e7eb" }} />
-
-            <div style={{ fontWeight: 700 }}>Elenco profili</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {profiles.map((p) => (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={styles.dot(p.color || "#111111")} />
-                    <div>
-                      <div style={{ fontWeight: 700 }}>{p.name}</div>
-                      <div style={styles.small}>{p.email} • ruolo {p.role}</div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {profiles.length === 0 && <div style={styles.small}>Nessun profilo visibile. Controlla policy/ruolo.</div>}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CollabView({
-  profile,
-  projects,
-  activitiesByProject,
-  meId,
-  expandedProjects,
-  toggleExpand,
-  draftByProject,
-  setDraftByProject,
-  addActivity,
-  editActId,
-  editActText,
-  setEditActId,
-  setEditActText,
-  updateActivity,
-  deleteActivity,
-  profilesById,
-  refreshAll,
-  goHome,
-  doLogout,
-}) {
-  return (
-    <div style={styles.page}>
-      <div style={styles.topbar}>
-        <div>
-          <h1 style={styles.h1}>Area Collaboratore</h1>
-          <div style={styles.small}>
-            <span style={{ fontWeight: 800, color: profile.color }}>{profile.name}</span> — attività visibili solo a te
-          </div>
-        </div>
-        <div style={styles.row}>
-          <button style={styles.btn2} onClick={goHome}>Home</button>
-          <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
-          <button style={styles.btn2} onClick={doLogout}>Logout</button>
-        </div>
-      </div>
-
-      <div style={styles.grid}>
-        {projects.map((p) => {
-          const acts = (activitiesByProject.get(p.id) || [])
-            .filter((a) => a.user_id === meId)
-            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-          const expanded = !!expandedProjects[p.id];
-          const shown = expanded ? acts : clamp10(acts);
-
-          return (
-            <div key={p.id} style={styles.card}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 800 }}>{p.title}</div>
-                  <div style={styles.small}>{p.subtitle || "—"}</div>
-                  <div style={styles.small}>Periodo: {p.start_date} → {p.end_date}</div>
-                </div>
-                <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>
-                  {expanded ? "Comprimi" : "Espandi"}
-                </button>
-              </div>
-
-              <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  style={styles.input}
-                  placeholder="Scrivi attività…"
-                  value={draftByProject[p.id] || ""}
-                  onChange={(e) => setDraftByProject((d) => ({ ...d, [p.id]: e.target.value }))}
-                />
-                <button style={styles.btn} onClick={() => addActivity(p.id)}>Salva</button>
-              </div>
-
-              <div style={{ marginTop: 12 }}>
-                {shown.map((a) => (
-                  <ActivityItem
-                    key={a.id}
-                    a={a}
-                    allowEdit={true}
-                    profilesById={profilesById}
-                    editActId={editActId}
-                    editActText={editActText}
-                    setEditActId={setEditActId}
-                    setEditActText={setEditActText}
-                    onUpdate={updateActivity}
-                    onDelete={deleteActivity}
-                  />
-                ))}
-                {acts.length === 0 && <div style={styles.small}>Nessuna attività ancora.</div>}
-                {acts.length > 10 && !expanded && (
-                  <div style={{ marginTop: 8 }}>
-                    <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>Mostra tutte ({acts.length})</button>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-
-        {projects.length === 0 && (
-          <div style={styles.card}>
-            <div style={{ fontWeight: 800 }}>Nessun progetto</div>
-            <div style={styles.small}>Creali dal pannello Admin.</div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function DashboardView({
-  profile,
-  profiles,
-  projects,
-  filteredActivities,
-  fProject,
-  setFProject,
-  fUser,
-  setFUser,
-  fPeriod,
-  setFPeriod,
-  fFrom,
-  setFFrom,
-  fTo,
-  setFTo,
-  expandedProjects,
-  toggleExpand,
-  activitiesByProjectFiltered,
-  resourcesByProject,
-  profilesById,
-  lastActivityByUser,
-  exportPdfTable,
-  exportPdfEditorial,
-  refreshAll,
-  goHome,
-  doLogout,
-}) {
-  const collabs = profiles.filter((p) => p.role === "collab");
-
-  return (
-    <div style={styles.page}>
-      <div style={styles.topbar}>
-        <div>
-          <h1 style={styles.h1}>Dashboard</h1>
-          <div style={styles.small}>
-            {profile.name} — ruolo <b>{profile.role}</b>
-          </div>
-        </div>
-        <div style={styles.row}>
-          <button style={styles.btn2} onClick={goHome}>Home</button>
-          <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
-          <button style={styles.btn2} onClick={doLogout}>Logout</button>
-        </div>
-      </div>
-
-      <div style={{ ...styles.card, marginBottom: 12 }}>
-        <SectionTitle title="Collaboratori — ultima attività" right={null} />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
-          {collabs.map((c) => {
-            const last = lastActivityByUser.get(c.id) || null;
-            const days = daysDiffFromNow(last);
-            const color = last ? statusColorByDays(days) : "#dc2626";
-            return (
-              <div key={c.id} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={styles.dot(c.color || "#111111")} />
-                    <div style={{ fontWeight: 800 }}>{c.name}</div>
-                  </div>
-                  <span style={styles.dot(color)} title="Stato ultimo aggiornamento" />
-                </div>
-                <div style={styles.small}>
-                  Ultima attività: <b>{last ? fmtDateTime(last) : "mai"}</b>
-                </div>
-                <div style={styles.small}>
-                  Stato: {last ? (days <= 7 ? "verde (≤7gg)" : days <= 10 ? "arancione (8–10gg)" : "rosso (≥11gg)") : "rosso (nessuna attività)"}
-                </div>
-              </div>
-            );
-          })}
-          {collabs.length === 0 && <div style={styles.small}>Nessun collaboratore (role=collab) visibile.</div>}
-        </div>
-      </div>
-
-      <div style={{ ...styles.card, marginBottom: 12 }}>
-        <SectionTitle
-          title="Filtri + Export PDF"
-          right={
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button style={styles.btn2} onClick={exportPdfTable}>Export PDF (tabella)</button>
-              <button style={styles.btn2} onClick={exportPdfEditorial}>Export PDF (per progetto)</button>
-            </div>
-          }
-        />
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
-          <div>
-            <div style={styles.small}>Progetto</div>
-            <select style={styles.select} value={fProject} onChange={(e) => setFProject(e.target.value)}>
-              <option value="all">Tutti</option>
-              {projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
-            </select>
-          </div>
-
-          <div>
-            <div style={styles.small}>Collaboratore</div>
-            <select style={styles.select} value={fUser} onChange={(e) => setFUser(e.target.value)}>
-              <option value="all">Tutti</option>
-              {profiles.filter((p) => p.role === "collab").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </div>
-
-          <div>
-            <div style={styles.small}>Periodo</div>
-            <select style={styles.select} value={fPeriod} onChange={(e) => setFPeriod(e.target.value)}>
-              <option value="all">Tutte</option>
-              <option value="last7">Ultimi 7GG</option>
-              <option value="custom">Custom</option>
-            </select>
-          </div>
-
-          <div style={{ opacity: fPeriod === "custom" ? 1 : 0.5 }}>
-            <div style={styles.small}>Da</div>
-            <input style={styles.input} type="date" value={fFrom} onChange={(e) => setFFrom(e.target.value)} disabled={fPeriod !== "custom"} />
-          </div>
-          <div style={{ opacity: fPeriod === "custom" ? 1 : 0.5 }}>
-            <div style={styles.small}>A</div>
-            <input style={styles.input} type="date" value={fTo} onChange={(e) => setFTo(e.target.value)} disabled={fPeriod !== "custom"} />
-          </div>
-        </div>
-
-        <div style={{ marginTop: 10, ...styles.small }}>
-          Attività filtrate: <b>{filteredActivities.length}</b>
-        </div>
-      </div>
-
-      <div style={styles.grid}>
-        {projects.map((p) => {
-          const acts = (activitiesByProjectFiltered.get(p.id) || []).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          const expanded = !!expandedProjects[p.id];
-          const shown = expanded ? acts : clamp10(acts);
-
-          const past = isPastEndDate(p.end_date);
-          const resSet = resourcesByProject.get(p.id);
-          const resNames = resSet ? [...resSet].map((id) => profilesById.get(id)?.name || "—") : [];
-
-          return (
-            <div key={p.id} style={styles.card}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 800 }}>{p.title}</div>
-                  <div style={styles.small}>{p.subtitle || "—"}</div>
-
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
-                    <span style={styles.small}>Inizio: <b>{p.start_date}</b></span>
-                    <span style={styles.small}>Fine: <b>{p.end_date}</b></span>
-                    <Pill color={past ? "#dc2626" : "#16a34a"} label={past ? "terminato" : "in corso"} />
-                  </div>
-
-                  <div style={{ marginTop: 8, fontSize: 13 }}>
-                    <b>Risorse interessate:</b>{" "}
-                    {resNames.length ? resNames.map((n) => <span key={n} style={{ fontWeight: 800, marginRight: 8 }}>{n}</span>) : <span style={styles.small}>—</span>}
-                  </div>
-                </div>
-
-                <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>
-                  {expanded ? "Comprimi" : "Espandi"}
-                </button>
-              </div>
-
-              <div style={{ marginTop: 12 }}>
-                {shown.map((a) => (
-                  <ActivityItem
-                    key={a.id}
-                    a={a}
-                    allowEdit={false}
-                    profilesById={profilesById}
-                    editActId={null}
-                    editActText=""
-                    setEditActId={() => {}}
-                    setEditActText={() => {}}
-                    onUpdate={() => {}}
-                    onDelete={() => {}}
-                  />
-                ))}
-                {acts.length === 0 && <div style={styles.small}>Nessuna attività (con i filtri attuali).</div>}
-                {acts.length > 10 && !expanded && (
-                  <div style={{ marginTop: 8 }}>
-                    <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>Mostra tutte ({acts.length})</button>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-
-        {projects.length === 0 && (
-          <div style={styles.card}>
-            <div style={{ fontWeight: 800 }}>Nessun progetto</div>
-            <div style={styles.small}>Creali dal pannello Admin.</div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [view, setView] = useState("home"); // home | auth | admin | collab | dashboard
-  const [intent, setIntent] = useState(null); // "admin" | "collab" | "dashboard"
+  const [intent, setIntent] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const [session, setSession] = useState(null);
-  const [profile, setProfile] = useState(null); // {id,email,name,color,role}
+  const [profile, setProfile] = useState(null);
 
   const [authEmail, setAuthEmail] = useState("");
   const [authPass, setAuthPass] = useState("");
@@ -718,11 +229,17 @@ export default function App() {
 
   const [fProject, setFProject] = useState("all");
   const [fUser, setFUser] = useState("all");
-  const [fPeriod, setFPeriod] = useState("all"); // all | last7 | custom
+  const [fPeriod, setFPeriod] = useState("all");
   const [fFrom, setFFrom] = useState(toISODateOnly(new Date(Date.now() - 7 * 86400000)));
   const [fTo, setFTo] = useState(toISODateOnly(new Date()));
 
   const mounted = useRef(false);
+  const focusKeeper = useFocusKeeper();
+
+  // ripristina focus dopo OGNI render (workaround forte ma efficace)
+  useEffect(() => {
+    focusKeeper.restore();
+  });
 
   useEffect(() => {
     mounted.current = true;
@@ -1015,15 +532,6 @@ export default function App() {
       styles: { fontSize: 9, cellPadding: 6, overflow: "linebreak" },
       headStyles: { fillColor: [17, 24, 39] },
       columnStyles: { 0: { cellWidth: 190 }, 1: { cellWidth: 430 }, 2: { cellWidth: 170 } },
-      didDrawPage: (data) => {
-        const pageCount = doc.getNumberOfPages();
-        doc.setFontSize(9);
-        doc.text(
-          `Pagina ${data.pageNumber} / ${pageCount}`,
-          doc.internal.pageSize.getWidth() - 90,
-          doc.internal.pageSize.getHeight() - 20
-        );
-      },
     });
 
     doc.save(`export_attivita_tabella_${uid()}.pdf`);
@@ -1093,6 +601,7 @@ export default function App() {
 
   if (loading) return <div style={styles.page}>Caricamento…</div>;
 
+  // HOME
   if (view === "home") {
     return (
       <div style={styles.page}>
@@ -1123,26 +632,43 @@ export default function App() {
             </div>
           )}
         </div>
-
-        <div style={styles.small}>
-          Se qualcosa non funziona: controlla in Vercel le env var e in Supabase che l’utente abbia un profilo.
-        </div>
       </div>
     );
   }
 
+  // AUTH
   if (view === "auth") {
     return (
-      <AuthView
-        intent={intent}
-        authEmail={authEmail}
-        authPass={authPass}
-        setAuthEmail={setAuthEmail}
-        setAuthPass={setAuthPass}
-        authError={authError}
-        doLogin={doLogin}
-        goBack={() => { setView("home"); setAuthError(""); }}
-      />
+      <div style={styles.page}>
+        <div style={styles.topbar}>
+          <div>
+            <h1 style={styles.h1}>Login</h1>
+            <div style={styles.small}>Sezione scelta: <b>{intent || "—"}</b></div>
+          </div>
+          <button style={styles.btn2} onClick={() => { setView("home"); setAuthError(""); }}>← Indietro</button>
+        </div>
+
+        <div style={{ ...styles.card, maxWidth: 520 }}>
+          <div style={{ display: "grid", gap: 10 }}>
+            <div>
+              <div style={styles.small}>Email</div>
+              <FInput fid="login-email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="es. admin@test.it" />
+            </div>
+            <div>
+              <div style={styles.small}>Password</div>
+              <FInput fid="login-pass" type="password" value={authPass} onChange={(e) => setAuthPass(e.target.value)} placeholder="••••••••" />
+            </div>
+
+            {authError && (
+              <div style={{ padding: 10, borderRadius: 10, background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" }}>
+                {authError}
+              </div>
+            )}
+
+            <button style={styles.btn} onClick={doLogin}>Entra</button>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -1157,117 +683,361 @@ export default function App() {
     );
   }
 
-  if (!profile) return <MissingProfile doLogout={doLogout} />;
+  if (!profile) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.card}>
+          <div style={{ fontWeight: 800, marginBottom: 8 }}>Profilo mancante</div>
+          <div style={styles.small}>Crea la riga in <b>profiles</b> con l’UUID di questo utente.</div>
+          <div style={{ marginTop: 12 }}>
+            <button style={styles.btn2} onClick={doLogout}>Logout</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
+  // ADMIN
   if (view === "admin") {
-    if (profile.role !== "admin") {
-      return (
-        <div style={styles.page}>
+    if (profile.role !== "admin") return <div style={styles.page}><div style={styles.card}>Accesso negato (serve admin).</div></div>;
+
+    return (
+      <div style={styles.page}>
+        <div style={styles.topbar}>
+          <div>
+            <h1 style={styles.h1}>Pannello Admin</h1>
+            <div style={styles.small}>{profile.name} — ruolo <b>{profile.role}</b></div>
+          </div>
+          <div style={styles.row}>
+            <button style={styles.btn2} onClick={() => setView("home")}>Home</button>
+            <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
+            <button style={styles.btn2} onClick={doLogout}>Logout</button>
+          </div>
+        </div>
+
+        <div style={styles.grid}>
           <div style={styles.card}>
-            Accesso negato. Ruolo richiesto: admin.
-            <div style={{ marginTop: 10 }}>
-              <button style={styles.btn2} onClick={() => setView("home")}>Home</button>
+            <SectionTitle title="Progetti" />
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ fontWeight: 700 }}>Crea progetto</div>
+              <FInput fid="proj-title" placeholder="Titolo" value={newProj.title} onChange={(e) => setNewProj((p) => ({ ...p, title: e.target.value }))} />
+              <FInput fid="proj-sub" placeholder="Sottotitolo" value={newProj.subtitle} onChange={(e) => setNewProj((p) => ({ ...p, subtitle: e.target.value }))} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={styles.small}>Inizio</div>
+                  <FInput fid="proj-start" type="date" value={newProj.start_date} onChange={(e) => setNewProj((p) => ({ ...p, start_date: e.target.value }))} />
+                </div>
+                <div>
+                  <div style={styles.small}>Fine</div>
+                  <FInput fid="proj-end" type="date" value={newProj.end_date} onChange={(e) => setNewProj((p) => ({ ...p, end_date: e.target.value }))} />
+                </div>
+              </div>
+              <button style={styles.btn} onClick={createProject}>Crea</button>
+
+              <hr style={{ border: 0, borderTop: "1px solid #e5e7eb" }} />
+
+              <div style={{ fontWeight: 700 }}>Rinomina / modifica sottotitolo</div>
+              <FSelect
+                fid="proj-pick"
+                value={renameProj.id}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const p = projects.find((x) => x.id === id);
+                  setRenameProj({ id, title: p?.title || "", subtitle: p?.subtitle || "" });
+                }}
+              >
+                <option value="">Seleziona progetto…</option>
+                {projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </FSelect>
+
+              <FInput fid="proj-rename-title" placeholder="Nuovo titolo" value={renameProj.title} onChange={(e) => setRenameProj((p) => ({ ...p, title: e.target.value }))} />
+              <FInput fid="proj-rename-sub" placeholder="Nuovo sottotitolo" value={renameProj.subtitle} onChange={(e) => setRenameProj((p) => ({ ...p, subtitle: e.target.value }))} />
+
+              <button style={styles.btn2} onClick={updateProject} disabled={!renameProj.id}>Salva modifiche</button>
+
+              <hr style={{ border: 0, borderTop: "1px solid #e5e7eb" }} />
+              <div style={{ fontWeight: 700 }}>Elimina progetto</div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {projects.map((p) => (
+                  <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>{p.title}</div>
+                      <div style={styles.small}>{p.subtitle || "—"} • {p.start_date} → {p.end_date}</div>
+                    </div>
+                    <button style={styles.btnDanger} onClick={() => deleteProject(p.id)}>Elimina</button>
+                  </div>
+                ))}
+                {projects.length === 0 && <div style={styles.small}>Nessun progetto.</div>}
+              </div>
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <SectionTitle title="Collaboratori (profili)" />
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={styles.small}>
+                Qui modifichi nome/colore/ruolo (password in Supabase Auth).
+              </div>
+
+              <FSelect
+                fid="prof-pick"
+                value={editProfile.id}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const p = profiles.find((x) => x.id === id);
+                  setEditProfile({ id, name: p?.name || "", color: p?.color || "#111111", role: p?.role || "collab" });
+                }}
+              >
+                <option value="">Seleziona utente…</option>
+                {profiles.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
+              </FSelect>
+
+              <FInput fid="prof-name" value={editProfile.name} disabled={!editProfile.id} onChange={(e) => setEditProfile((p) => ({ ...p, name: e.target.value }))} placeholder="Nome" />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, opacity: editProfile.id ? 1 : 0.6 }}>
+                <div>
+                  <div style={styles.small}>Colore</div>
+                  <input
+                    data-fid="prof-color"
+                    type="color"
+                    value={editProfile.color}
+                    disabled={!editProfile.id}
+                    onChange={(e) => setEditProfile((p) => ({ ...p, color: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <div style={styles.small}>Ruolo</div>
+                  <FSelect fid="prof-role" value={editProfile.role} disabled={!editProfile.id} onChange={(e) => setEditProfile((p) => ({ ...p, role: e.target.value }))}>
+                    <option value="collab">collab</option>
+                    <option value="dashboard">dashboard</option>
+                    <option value="admin">admin</option>
+                  </FSelect>
+                </div>
+              </div>
+
+              <button style={styles.btn} disabled={!editProfile.id} onClick={saveProfileEdits}>Salva profilo</button>
             </div>
           </div>
         </div>
-      );
-    }
-    return (
-      <AdminView
-        profile={profile}
-        projects={projects}
-        profiles={profiles}
-        newProj={newProj}
-        setNewProj={setNewProj}
-        createProject={createProject}
-        renameProj={renameProj}
-        setRenameProj={setRenameProj}
-        updateProject={updateProject}
-        deleteProject={deleteProject}
-        editProfile={editProfile}
-        setEditProfile={setEditProfile}
-        saveProfileEdits={saveProfileEdits}
-        refreshAll={refreshAll}
-        goHome={() => setView("home")}
-        doLogout={doLogout}
-      />
+      </div>
     );
   }
 
+  // COLLAB
   if (view === "collab") {
-    if (profile.role !== "collab") {
-      return (
-        <div style={styles.page}>
-          <div style={styles.card}>
-            Accesso negato. Ruolo richiesto: collab.
-            <div style={{ marginTop: 10 }}>
-              <button style={styles.btn2} onClick={() => setView("home")}>Home</button>
-            </div>
+    if (profile.role !== "collab") return <div style={styles.page}><div style={styles.card}>Accesso negato (serve collab).</div></div>;
+
+    return (
+      <div style={styles.page}>
+        <div style={styles.topbar}>
+          <div>
+            <h1 style={styles.h1}>Area Collaboratore</h1>
+            <div style={styles.small}><b style={{ color: profile.color }}>{profile.name}</b></div>
+          </div>
+          <div style={styles.row}>
+            <button style={styles.btn2} onClick={() => setView("home")}>Home</button>
+            <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
+            <button style={styles.btn2} onClick={doLogout}>Logout</button>
           </div>
         </div>
-      );
-    }
-    return (
-      <CollabView
-        profile={profile}
-        projects={projects}
-        activitiesByProject={activitiesByProject}
-        meId={meId}
-        expandedProjects={expandedProjects}
-        toggleExpand={toggleExpand}
-        draftByProject={draftByProject}
-        setDraftByProject={setDraftByProject}
-        addActivity={addActivity}
-        editActId={editActId}
-        editActText={editActText}
-        setEditActId={setEditActId}
-        setEditActText={setEditActText}
-        updateActivity={updateActivity}
-        deleteActivity={deleteActivity}
-        profilesById={profilesById}
-        refreshAll={refreshAll}
-        goHome={() => setView("home")}
-        doLogout={doLogout}
-      />
+
+        <div style={styles.grid}>
+          {projects.map((p) => {
+            const acts = (activitiesByProject.get(p.id) || [])
+              .filter((a) => a.user_id === meId)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            const expanded = !!expandedProjects[p.id];
+            const shown = expanded ? acts : clamp10(acts);
+
+            return (
+              <div key={p.id} style={styles.card}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{p.title}</div>
+                    <div style={styles.small}>{p.subtitle || "—"}</div>
+                    <div style={styles.small}>Periodo: {p.start_date} → {p.end_date}</div>
+                  </div>
+                  <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>{expanded ? "Comprimi" : "Espandi"}</button>
+                </div>
+
+                <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                  <FInput
+                    fid={`act-draft-${p.id}`}
+                    placeholder="Scrivi attività…"
+                    value={draftByProject[p.id] || ""}
+                    onChange={(e) => setDraftByProject((d) => ({ ...d, [p.id]: e.target.value }))}
+                  />
+                  <button style={styles.btn} onClick={() => addActivity(p.id)}>Salva</button>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  {shown.map((a) => (
+                    <ActivityItem
+                      key={a.id}
+                      a={a}
+                      allowEdit={true}
+                      profilesById={profilesById}
+                      editActId={editActId}
+                      editActText={editActText}
+                      setEditActId={setEditActId}
+                      setEditActText={setEditActText}
+                      onUpdate={updateActivity}
+                      onDelete={deleteActivity}
+                    />
+                  ))}
+                  {acts.length === 0 && <div style={styles.small}>Nessuna attività ancora.</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     );
   }
 
+  // DASHBOARD
   if (view === "dashboard") {
-    if (profile.role !== "dashboard" && profile.role !== "admin") {
-      return (
-        <div style={styles.page}>
-          <div style={styles.card}>Accesso negato. Ruolo richiesto: dashboard (o admin).</div>
-        </div>
-      );
-    }
+    if (profile.role !== "dashboard" && profile.role !== "admin") return <div style={styles.page}><div style={styles.card}>Accesso negato (serve dashboard o admin).</div></div>;
+
     return (
-      <DashboardView
-        profile={profile}
-        profiles={profiles}
-        projects={projects}
-        filteredActivities={filteredActivities}
-        fProject={fProject}
-        setFProject={setFProject}
-        fUser={fUser}
-        setFUser={setFUser}
-        fPeriod={fPeriod}
-        setFPeriod={setFPeriod}
-        fFrom={fFrom}
-        setFFrom={setFFrom}
-        fTo={fTo}
-        setFTo={setFTo}
-        expandedProjects={expandedProjects}
-        toggleExpand={toggleExpand}
-        activitiesByProjectFiltered={activitiesByProjectFiltered}
-        resourcesByProject={resourcesByProject}
-        profilesById={profilesById}
-        lastActivityByUser={lastActivityByUser}
-        exportPdfTable={exportPdfTable}
-        exportPdfEditorial={exportPdfEditorial}
-        refreshAll={refreshAll}
-        goHome={() => setView("home")}
-        doLogout={doLogout}
-      />
+      <div style={styles.page}>
+        <div style={styles.topbar}>
+          <div>
+            <h1 style={styles.h1}>Dashboard</h1>
+            <div style={styles.small}>{profile.name}</div>
+          </div>
+          <div style={styles.row}>
+            <button style={styles.btn2} onClick={() => setView("home")}>Home</button>
+            <button style={styles.btn2} onClick={refreshAll}>Aggiorna</button>
+            <button style={styles.btn2} onClick={doLogout}>Logout</button>
+          </div>
+        </div>
+
+        <div style={{ ...styles.card, marginBottom: 12 }}>
+          <SectionTitle title="Collaboratori — ultima attività" />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
+            {profiles.filter((p) => p.role === "collab").map((c) => {
+              const last = lastActivityByUser.get(c.id) || null;
+              const days = daysDiffFromNow(last);
+              const color = last ? statusColorByDays(days) : "#dc2626";
+              return (
+                <div key={c.id} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={styles.dot(c.color || "#111111")} />
+                      <div style={{ fontWeight: 800 }}>{c.name}</div>
+                    </div>
+                    <span style={styles.dot(color)} />
+                  </div>
+                  <div style={styles.small}>Ultima attività: <b>{last ? fmtDateTime(last) : "mai"}</b></div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ ...styles.card, marginBottom: 12 }}>
+          <SectionTitle
+            title="Filtri + Export PDF"
+            right={
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button style={styles.btn2} onClick={exportPdfTable}>Export PDF (tabella)</button>
+                <button style={styles.btn2} onClick={exportPdfEditorial}>Export PDF (per progetto)</button>
+              </div>
+            }
+          />
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+            <div>
+              <div style={styles.small}>Progetto</div>
+              <FSelect fid="f-proj" value={fProject} onChange={(e) => setFProject(e.target.value)}>
+                <option value="all">Tutti</option>
+                {projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </FSelect>
+            </div>
+
+            <div>
+              <div style={styles.small}>Collaboratore</div>
+              <FSelect fid="f-user" value={fUser} onChange={(e) => setFUser(e.target.value)}>
+                <option value="all">Tutti</option>
+                {profiles.filter((p) => p.role === "collab").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </FSelect>
+            </div>
+
+            <div>
+              <div style={styles.small}>Periodo</div>
+              <FSelect fid="f-period" value={fPeriod} onChange={(e) => setFPeriod(e.target.value)}>
+                <option value="all">Tutte</option>
+                <option value="last7">Ultimi 7GG</option>
+                <option value="custom">Custom</option>
+              </FSelect>
+            </div>
+
+            <div style={{ opacity: fPeriod === "custom" ? 1 : 0.5 }}>
+              <div style={styles.small}>Da</div>
+              <FInput fid="f-from" type="date" value={fFrom} onChange={(e) => setFFrom(e.target.value)} disabled={fPeriod !== "custom"} />
+            </div>
+
+            <div style={{ opacity: fPeriod === "custom" ? 1 : 0.5 }}>
+              <div style={styles.small}>A</div>
+              <FInput fid="f-to" type="date" value={fTo} onChange={(e) => setFTo(e.target.value)} disabled={fPeriod !== "custom"} />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10, ...styles.small }}>Attività filtrate: <b>{filteredActivities.length}</b></div>
+        </div>
+
+        <div style={styles.grid}>
+          {projects.map((p) => {
+            const acts = (activitiesByProjectFiltered.get(p.id) || []).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const expanded = !!expandedProjects[p.id];
+            const shown = expanded ? acts : clamp10(acts);
+            const past = isPastEndDate(p.end_date);
+
+            const resSet = resourcesByProject.get(p.id);
+            const resNames = resSet ? [...resSet].map((id) => profilesById.get(id)?.name || "—") : [];
+
+            return (
+              <div key={p.id} style={styles.card}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{p.title}</div>
+                    <div style={styles.small}>{p.subtitle || "—"}</div>
+                    <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <Pill color={past ? "#dc2626" : "#16a34a"} label={past ? "terminato" : "in corso"} />
+                      <span style={styles.small}>Inizio: <b>{p.start_date}</b></span>
+                      <span style={styles.small}>Fine: <b>{p.end_date}</b></span>
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 13 }}>
+                      <b>Risorse interessate:</b>{" "}
+                      {resNames.length ? resNames.map((n) => <span key={n} style={{ fontWeight: 800, marginRight: 8 }}>{n}</span>) : <span style={styles.small}>—</span>}
+                    </div>
+                  </div>
+                  <button style={styles.btn2} onClick={() => toggleExpand(p.id)}>{expanded ? "Comprimi" : "Espandi"}</button>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  {shown.map((a) => (
+                    <ActivityItem
+                      key={a.id}
+                      a={a}
+                      allowEdit={false}
+                      profilesById={profilesById}
+                      editActId={null}
+                      editActText=""
+                      setEditActId={() => {}}
+                      setEditActText={() => {}}
+                      onUpdate={() => {}}
+                      onDelete={() => {}}
+                    />
+                  ))}
+                  {acts.length === 0 && <div style={styles.small}>Nessuna attività (con i filtri attuali).</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     );
   }
 

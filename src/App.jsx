@@ -109,6 +109,41 @@ function useFocusKeeper() {
     } catch {}
     last.current = { fid, start, end };
   };
+// --- FIX HARD: evita che il focus "cada" su BODY mentre stai scrivendo ---
+useEffect(() => {
+  const onFocusOut = (e) => {
+    const el = e.target;
+    if (!el) return;
+
+    const isTypingField =
+      el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.isContentEditable;
+
+    if (!isTypingField) return;
+
+    // Se dopo il focusout l'activeElement diventa BODY, ripristina focus sul campo
+    setTimeout(() => {
+      if (document.activeElement === document.body) {
+        try {
+          el.focus({ preventScroll: true });
+        } catch {
+          try { el.focus(); } catch {}
+        }
+        // ripristina caret (se possibile)
+        try {
+          if (typeof el.selectionStart === "number") {
+            const pos = el.selectionStart;
+            el.setSelectionRange(pos, pos);
+          }
+        } catch {}
+      }
+    }, 0);
+  };
+
+  document.addEventListener("focusout", onFocusOut, true);
+  return () => document.removeEventListener("focusout", onFocusOut, true);
+}, []);
 
   useEffect(() => {
     const onFocusIn = (e) => capture(e.target);
